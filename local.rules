@@ -1,0 +1,28 @@
+#1. ICMP Ping Scan
+alert icmp $EXTERNAL_NET any -> $HOME_NET any (msg:"ICMP Ping Scan detected"; sid:1000001; rev:1; classtype:network-scan;)
+
+#2. TCP SYN Scan (half-open)
+drop tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"TCP SYN Scan detected"; flags:S; detection_filter:track by_src, count 5, seconds 5; sid:1000002; rev:1; classtype:network-scan;)
+
+#3. TCP Connect Scan (full handshake + payload)
+drop tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"TCP Connect Scan detected"; flags:PA; flow:established,to_server; dsize:>0; detection_filter:track by_src, count 3, seconds 10; sid:1000003; rev:1; classtype:network-scan;)
+
+#4. TCP NULL Scan
+drop tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"TCP NULL Scan detected"; flags:0; detection_filter:track by_src, count 5, seconds 10; sid:1000004; rev:1; classtype:network-scan;)
+
+#5. TCP FIN Scan
+drop tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"TCP FIN Scan detected"; flags:F; detection_filter:track by_src, count 5, seconds 10; sid:1000005; rev:1; classtype:network-scan;)
+
+#6. TCP Xmas Scan
+drop tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"TCP Xmas Scan detected"; flags:FPU; detection_filter:track by_src, count 5, seconds 10; sid:1000006; rev:1; classtype:network-scan;)
+
+#7. TCP ACK Scan
+drop tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"TCP ACK Scan detected"; flags:A; detection_filter:track by_src, count 10, seconds 30; sid:1000007; rev:1; classtype:network-scan;)
+
+#8. UDP Scan
+drop udp $EXTERNAL_NET any -> $HOME_NET any (msg:"UDP Scan detected"; detection_filter:track by_src, count 10, seconds 20; sid:1000008; rev:1; classtype:network-scan;)
+
+#9. OS Detection (TCP + ICMP combo via flowbits)
+alert tcp $EXTERNAL_NET any -> $HOME_NET 80 (msg:"OS Detection - TCP probe"; flags:S; flowbits:set,os_detect; flowbits:noalert; sid:1000009; rev:1; classtype:network-scan;)
+
+drop icmp $EXTERNAL_NET any -> $HOME_NET any (msg:"OS Detection - ICMP after TCP"; itype:8; flowbits:isset,os_detect; flowbits:unset,os_detect; sid:1000010; rev:1; classtype:network-scan;)
