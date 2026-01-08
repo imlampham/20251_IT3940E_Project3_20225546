@@ -13,14 +13,12 @@ class NetworkScanner:
         self.target = target
         self.timeout = timeout
         
-        # Các cổng phổ biến nếu không được chỉ định
         if ports is None:
             self.ports = [21, 22, 23, 25, 53, 80, 110, 111, 135, 139, 
                          143, 443, 445, 993, 995, 1723, 3306, 3389, 5900, 8080]
         else:
             self.ports = ports
             
-        # Resolve hostname to IP
         try:
             self.target_ip = socket.gethostbyname(target)
         except socket.gaierror:
@@ -406,7 +404,6 @@ def main():
 
 
 if __name__ == "__main__":
-    # Kiểm tra quyền root (cần thiết cho raw sockets)
     if os.geteuid() != 0:
         print("[!] Cảnh báo: Script này cần quyền root/administrator")
         print("[!] Chạy với: sudo python3 network_scanner.py <target>")
