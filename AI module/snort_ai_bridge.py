@@ -45,13 +45,13 @@ class BridgePacketAnalyzer:
         self.alert_count = 0
         self.blocked_ips = set()
         self.alert_by_ip = {}
+        self.attacker_ips = {}
         self.start_time = time.time()
         self.ml_errors = 0
         self.signature_detections = 0
         
         self.load_blocked_ips()
         
-        # Load AI model with error handling
         logger.info("Loading AI model...")
         try:
             if detector.load_model():
@@ -68,7 +68,6 @@ class BridgePacketAnalyzer:
             self.ml_available = False
     
     def load_blocked_ips(self):
-        """Load blocked IPs from file"""
         try:
             if os.path.exists(BLOCK_LIST_FILE):
                 with open(BLOCK_LIST_FILE, 'r') as f:
@@ -78,7 +77,6 @@ class BridgePacketAnalyzer:
             logger.error(f"Error loading blocked IPs: {e}")
     
     def save_blocked_ip(self, ip):
-        """Save blocked IP to file"""
         if ip not in self.blocked_ips:
             self.blocked_ips.add(ip)
             try:
@@ -89,9 +87,26 @@ class BridgePacketAnalyzer:
             except Exception as e:
                 logger.error(f"Error saving blocked IP: {e}")
     
+    def track_attacker(self, src_ip, dst_ip, detection_methods):
+        attacker_ip = src_ip
+        
+        if attacker_ip not in self.attacker_ips:
+            self.attacker_ips[attacker_ip] = {
+                'alerts': 0,
+                'first_seen': time.time(),
+                'methods': [],
+                'targets': set()
+            }
+        
+        self.attacker_ips[attacker_ip]['alerts'] += 1
+        self.attacker_ips[attacker_ip]['methods'].extend(detection_methods)
+        self.attacker_ips[attacker_ip]['targets'].add(dst_ip)
+        self.attacker_ips[attacker_ip]['last_seen'] = time.time()
+        
+        return attacker_ip
+    
     def verify_ip_blocked(self, ip):
         try:
-        # Check INPUT chain
             result = subprocess.run(
                 ['iptables', '-L', 'INPUT', '-n', '-v'],
                 capture_output=True,
@@ -100,10 +115,9 @@ class BridgePacketAnalyzer:
             )
         
             if ip in result.stdout:
-                logger.debug(f"✓ Found {ip} in INPUT chain")
+                logger.debug(f" Found {ip} in INPUT chain")
                 return True
         
-        # Check FORWARD chain (MOST IMPORTANT for bridge)
             result = subprocess.run(
                 ['iptables', '-L', 'FORWARD', '-n', '-v'],
                 capture_output=True,
@@ -112,16 +126,14 @@ class BridgePacketAnalyzer:
             )
         
             if ip in result.stdout:
-                logger.debug(f"✓ Found {ip} in FORWARD chain")
+                logger.debug(f" Found {ip} in FORWARD chain")
             
-            # Count how many rules (should be at least 4 for bidirectional)
                 rule_count = result.stdout.count(ip)
-                logger.debug(f"✓ Found {rule_count} FORWARD rules for {ip}")
+                logger.debug(f" Found {rule_count} FORWARD rules for {ip}")
             
-                if rule_count >= 2:  # At least 2 rules (source + destination)
+                if rule_count >= 2:  
                     return True
         
-        # Check OUTPUT chain
             result = subprocess.run(
                 ['iptables', '-L', 'OUTPUT', '-n', '-v'],
                 capture_output=True,
@@ -150,93 +162,76 @@ class BridgePacketAnalyzer:
             failed_rules = 0
         
             for iface in [BRIDGE_IFACE_IN, BRIDGE_IFACE_OUT]:
-            
-            # ========================================
-            # 1. Block packets FROM this IP (source)
-            # ========================================
-            
-            # INPUT chain (packets to local system)
+                # INPUT chain (for packets to local system)
                 cmd1 = ['iptables', '-I', 'INPUT', '-i', iface, '-s', ip, '-j', 'DROP']
                 result1 = subprocess.run(cmd1, capture_output=True)
                 if result1.returncode == 0:
                     rules_added += 1
-                    logger.info(f"  ✓ INPUT -s {ip} on {iface}")
+                    logger.info(f"   INPUT -s {ip} on {iface}")
                 else:
                     failed_rules += 1
-                    logger.error(f"  ✗ INPUT -s {ip} on {iface} FAILED")
+                    logger.error(f"   INPUT -s {ip} on {iface} FAILED")
             
-            # FORWARD chain (packets being routed through - MOST IMPORTANT!)
+                # FORWARD chain (incoming direction)
                 cmd2 = ['iptables', '-I', 'FORWARD', '-i', iface, '-s', ip, '-j', 'DROP']
                 result2 = subprocess.run(cmd2, capture_output=True)
                 if result2.returncode == 0:
                     rules_added += 1
-                    logger.info(f"  ✓ FORWARD -s {ip} on {iface}")
+                    logger.info(f"   FORWARD -s {ip} on {iface}")
                 else:
                     failed_rules += 1
-                    logger.error(f"  ✗ FORWARD -s {ip} on {iface} FAILED")
+                    logger.error(f"   FORWARD -s {ip} on {iface} FAILED")
             
-            # ========================================
-            # 2. Block packets TO this IP (destination) ← ✅ CRITICAL!
-            # ========================================
-            
-            # FORWARD chain (outgoing direction)
+                # FORWARD chain (outgoing direction)
                 cmd3 = ['iptables', '-I', 'FORWARD', '-o', iface, '-d', ip, '-j', 'DROP']
                 result3 = subprocess.run(cmd3, capture_output=True)
                 if result3.returncode == 0:
                     rules_added += 1
-                    logger.info(f"  ✓ FORWARD -d {ip} on {iface}")
+                    logger.info(f"   FORWARD -d {ip} on {iface}")
                 else:
                     failed_rules += 1
-                    logger.error(f"  ✗ FORWARD -d {ip} on {iface} FAILED")
+                    logger.error(f"   FORWARD -d {ip} on {iface} FAILED")
             
                 # OUTPUT chain (packets from local system)
                 cmd4 = ['iptables', '-I', 'OUTPUT', '-o', iface, '-d', ip, '-j', 'DROP']
                 result4 = subprocess.run(cmd4, capture_output=True)
                 if result4.returncode == 0:
                     rules_added += 1
-                    logger.info(f"  ✓ OUTPUT -d {ip} on {iface}")
+                    logger.info(f"   OUTPUT -d {ip} on {iface}")
                 else:
                     failed_rules += 1
-                    logger.error(f"  ✗ OUTPUT -d {ip} on {iface} FAILED")
+                    logger.error(f"   OUTPUT -d {ip} on {iface} FAILED")
         
-        # ========================================
-        # 3. Additional REJECT rules (for feedback)
-        # ========================================
         
-        # Global INPUT REJECT (any interface)
+            # Global INPUT REJECT (any interface)
             cmd5 = ['iptables', '-I', 'INPUT', '-s', ip, '-j', 'REJECT', '--reject-with', 'icmp-port-unreachable']
             result5 = subprocess.run(cmd5, capture_output=True)
             if result5.returncode == 0:
                 rules_added += 1
-                logger.info(f"  ✓ INPUT REJECT (global)")
+                logger.info(f"   INPUT REJECT (global)")
         
-        # Global FORWARD REJECT (any interface)
+            # Global FORWARD REJECT (any interface)
             cmd6 = ['iptables', '-I', 'FORWARD', '-s', ip, '-j', 'REJECT', '--reject-with', 'icmp-port-unreachable']
             result6 = subprocess.run(cmd6, capture_output=True)
             if result6.returncode == 0:
                 rules_added += 1
-                logger.info(f"  ✓ FORWARD REJECT (global)")
+                logger.info(f"   FORWARD REJECT (global)")
         
             logger.info(f"\n  Rules added: {rules_added}")
             logger.info(f"  Failed rules: {failed_rules}")
-        
-        # ========================================
-        # 4. Verify blocking
-        # ========================================
-        
-            time.sleep(0.5)  # Let iptables apply
+    
+            time.sleep(0.5)  
+
             is_blocked = self.verify_ip_blocked(ip)
         
             if is_blocked:
-            # Success!
                 self.save_blocked_ip(ip)
             
-                logger.critical(f"\n{GREEN}✓ BLOCKED & VERIFIED{RESET}")
+                logger.critical(f"\n BLOCKED & VERIFIED")
                 logger.critical(f"  IP: {ip}")
                 logger.critical(f"  Reason: {reason}")
                 logger.critical(f"  Rules: {rules_added}/{rules_added + failed_rules}")
             
-            # Write to alert file
                 with open(ALERT_FILE, 'a') as f:
                     f.write(f"\n{'='*80}\n")
                     f.write(f"[BLOCKED & VERIFIED] {datetime.now()}\n")
@@ -247,18 +242,15 @@ class BridgePacketAnalyzer:
                     f.write(f"Verification: SUCCESS\n")
                     f.write(f"{'='*80}\n")
             
-            # Console box
-                print(f"\n{RED}╔{'═'*78}╗{RESET}")
-                print(f"{RED}║{GREEN} {'BLOCKED & VERIFIED':^76} {RED}║{RESET}")
-                print(f"{RED}║{RESET} IP: {ip:^72} {RED}║{RESET}")
-                print(f"{RED}║{RESET} Reason: {reason[:68]:^72} {RED}║{RESET}")
-                print(f"{RED}║{RESET} Rules: {f'{rules_added}/{rules_added+failed_rules}':^72} {RED}║{RESET}")
-                print(f"{RED}╚{'═'*78}╝{RESET}\n")
+                print(f"{'BLOCKED & VERIFIED':^76} ")
+                print(f"+ IP: {ip:^72} ")
+                print(f"+ Reason: {reason[:68]:^72} ")
+                print(f"+ Rules: {f'{rules_added}/{rules_added+failed_rules}':^72}")
+
             
                 return True
             else:
-            # Failed verification
-                logger.error(f"\n{RED}✗ BLOCKING FAILED{RESET}")
+                logger.error(f"\n BLOCKING FAILED")
                 logger.error(f"  IP: {ip}")
                 logger.error(f"  Rules added: {rules_added}, but not verified in iptables")
                 logger.error(f"\nManual fix:")
@@ -272,14 +264,11 @@ class BridgePacketAnalyzer:
             return False
     
     def analyze_packet(self, packet):
-        """Main packet analysis function"""
         self.packet_count += 1
         
-        # Debug output for first 10 packets
         if self.packet_count <= 10:
             print(f"[DEBUG] Packet #{self.packet_count}: {packet.summary()}")
         
-        # Progress logging
         if self.packet_count % 100 == 0:
             elapsed = time.time() - self.start_time
             rate = self.packet_count / elapsed if elapsed > 0 else 0
@@ -299,14 +288,12 @@ class BridgePacketAnalyzer:
             src_ip = packet[IP].src
             dst_ip = packet[IP].dst
             
-            # Skip if already blocked
             if src_ip in self.blocked_ips:
                 return
             
             if packet.haslayer(TCP):
                 dst_port = packet[TCP].dport
                 
-                # Get payload
                 payload = None
                 if packet.haslayer(Raw):
                     payload = packet[Raw].load
@@ -314,13 +301,11 @@ class BridgePacketAnalyzer:
                 if not payload:
                     return
                 
-                # Convert payload to string
                 try:
                     payload_str = payload.decode('utf-8', errors='ignore')
                 except:
                     payload_str = str(payload)
                 
-                # Check if suspicious
                 if self.is_suspicious(payload_str):
                     self.analyze_suspicious_payload(src_ip, dst_ip, dst_port, payload_str, packet)
         
@@ -328,7 +313,6 @@ class BridgePacketAnalyzer:
             logger.error(f"Error analyzing packet: {e}", exc_info=True)
     
     def is_suspicious(self, payload):
-        """Quick signature-based check for suspicious content"""
         suspicious_keywords = [
             'system', 'eval', 'exec', 'shell_exec', 'passthru', 'assert',
             'base64_decode', 'gzinflate', 'gzuncompress', 'str_rot13',
@@ -347,9 +331,7 @@ class BridgePacketAnalyzer:
         return False
     
     def analyze_suspicious_payload(self, src_ip, dst_ip, dst_port, payload, packet):
-        """Deep analysis of suspicious payload"""
         try:
-            # Try AI analysis first
             result = None
             if self.ml_available:
                 try:
@@ -360,23 +342,9 @@ class BridgePacketAnalyzer:
                     logger.warning("Falling back to signature detection")
                     result = None
             
-            # If ML failed or not available, use signature detection only
             if result is None:
-                result = {
-                    'alert_level': 'CRITICAL',
-                    'webshell_detection': {
-                        'is_malicious': True,
-                        'confidence': 0.85,  # Signature-based confidence
-                        'detection_method': ['Signature_Only']
-                    },
-                    'revshell_detection': {
-                        'is_reverse_shell': False,
-                        'confidence_score': 0
-                    }
-                }
-                self.signature_detections += 1
+                return
             
-            # Check if critical
             if result['alert_level'] == 'CRITICAL':
                 self.alert_count += 1
                 self.alert_by_ip[src_ip] = self.alert_by_ip.get(src_ip, 0) + 1
@@ -384,7 +352,6 @@ class BridgePacketAnalyzer:
                 methods = result['webshell_detection']['detection_method']
                 confidence = result['webshell_detection']['confidence']
                 
-                # Alert message
                 alert_msg = f"""
                 {'='*80}
                 [ALERT #{self.alert_count}] Detected at {datetime.now()}
@@ -396,30 +363,19 @@ class BridgePacketAnalyzer:
                     Confidence: {confidence:.1%}
                     Detection Methods: {', '.join(methods)}
 
-                Reverse Shell Detection:
-                    Detected: {'YES' if result['revshell_detection']['is_reverse_shell'] else 'NO'}
-                    Score: {result['revshell_detection']['confidence_score']}
-
-                Payload Preview:
-                    {payload[:300]}...
-                    {'='*80}
                 """
                 
-                # Log and print
                 print(alert_msg)
                 logger.critical(alert_msg)
                 
-                # Write to file
                 with open(ALERT_FILE, 'a') as f:
                     f.write(alert_msg + '\n')
                 
-                # Console summary
                 print(f"\n[ALERT #{self.alert_count}] {methods[0] if methods else 'DETECTED'}")
                 print(f"  From: {src_ip} → To: {dst_ip}:{dst_port}")
                 print(f"  Confidence: {confidence:.1%}")
                 print(f"  Total alerts from this IP: {self.alert_by_ip[src_ip]}")
                 
-                # Auto-blocking logic
                 should_block = False
                 block_reason = ""
                 
@@ -429,9 +385,6 @@ class BridgePacketAnalyzer:
                 elif confidence >= 0.95 and 'Signature_WebShell' in methods:
                     should_block = True
                     block_reason = f"High confidence web shell ({confidence:.1%})"
-                elif result['revshell_detection']['is_reverse_shell']:
-                    should_block = True
-                    block_reason = "Reverse shell detected"
                 
                 if should_block:
                     print(f"\n[AUTO-BLOCK TRIGGERED]")
@@ -444,8 +397,7 @@ class BridgePacketAnalyzer:
 
 
 def check_bridge_interfaces():
-    """Check if bridge interfaces exist and are UP"""
-    print(f"\n{BLUE}Checking bridge interfaces...")
+    print(f"\nChecking bridge interfaces...")
     
     interfaces = get_if_list()
     
@@ -461,7 +413,6 @@ def check_bridge_interfaces():
         print(f" {BRIDGE_IFACE_OUT} not found!")
         return False
     
-    # Check interface status
     for iface in [BRIDGE_IFACE_IN, BRIDGE_IFACE_OUT]:
         try:
             result = subprocess.run(
@@ -481,47 +432,17 @@ def check_bridge_interfaces():
     return True
 
 
-def test_bridge_traffic():
-    """Test if there's traffic on bridge interfaces"""
-    print(f"\n{BLUE}Testing bridge traffic (10 seconds)...")
-    print(f"Sniffing on both {BRIDGE_IFACE_IN} and {BRIDGE_IFACE_OUT}")
-    
-    try:
-        packets_in = sniff(iface=BRIDGE_IFACE_IN, count=5, timeout=5)
-        packets_out = sniff(iface=BRIDGE_IFACE_OUT, count=5, timeout=5)
-        
-        print(f"\nResults:")
-        print(f"  {BRIDGE_IFACE_IN}: {len(packets_in)} packets")
-        print(f"  {BRIDGE_IFACE_OUT}: {len(packets_out)} packets")
-        
-        if len(packets_in) > 0 or len(packets_out) > 0:
-            print(f" Bridge has traffic")
-            return True
-        else:
-            print(f" No traffic detected on bridge")
-            print(f"  → Try generating traffic through the bridge")
-            return False
-    
-    except Exception as e:
-        print(f" Error: {e}")
-        return False
-
-
 def setup_bridge_forwarding():
-    """Setup bridge forwarding and iptables"""
-    print(f"\n{BLUE}Setting up bridge forwarding...")
+    print(f"\nSetting up bridge forwarding...")
     
     try:
-        # Enable IP forwarding
         os.system("sysctl -w net.ipv4.ip_forward=1")
         print(f" IP forwarding enabled")
         
-        # Disable ICMP redirects
         os.system("sysctl -w net.ipv4.conf.all.send_redirects=0")
         os.system("sysctl -w net.ipv4.conf.all.accept_redirects=0")
         print(f" ICMP redirects disabled")
         
-        # Allow forwarding
         os.system("iptables -P FORWARD ACCEPT")
         print(f" Bridge forwarding configured")
         
@@ -530,35 +451,22 @@ def setup_bridge_forwarding():
 
 
 def main():
-    """Main function"""
-    
-    # Check root
     if os.geteuid() != 0:
         print(f"ERROR: This script must be run as root!")
         print(f"Run: sudo python3 {sys.argv[0]}")
         sys.exit(1)
     
-    # Check interfaces
     if not check_bridge_interfaces():
         print(f"\nBridge interfaces not properly configured!")
         sys.exit(1)
     
-    # Setup forwarding
     setup_bridge_forwarding()
     
-    # Test traffic
-    test_bridge_traffic()
-    
-    # Start analyzer
     print(f"\nStarting bridge packet analyzer...")
     print(f"Monitoring interfaces: {BRIDGE_IFACE_IN}, {BRIDGE_IFACE_OUT}")
     print(f"Log file: {LOG_FILE}")
     print(f"Alert file: {ALERT_FILE}")
     print(f"Blocked IPs: {BLOCK_LIST_FILE}")
-    print(f"\nAuto-block triggers:")
-    print(f"  • 3+ alerts from same IP")
-    print(f"  • Web shell confidence >95%")
-    print(f"  • Reverse shell detected")
     print(f"\nPress Ctrl+C to stop\n")
     
     analyzer = BridgePacketAnalyzer()
@@ -578,21 +486,17 @@ def main():
         )
     
     try:
-        # Start sniffing threads
         thread_in = threading.Thread(target=sniff_in, daemon=True)
         thread_out = threading.Thread(target=sniff_out, daemon=True)
         
         thread_in.start()
         thread_out.start()
         
-        logger.info("Bridge mode started - monitoring both interfaces")
-        
-        # Keep main thread alive
         while True:
             time.sleep(1)
     
     except KeyboardInterrupt:
-        print(f"\n\n{BLUE}Stopping bridge analyzer...")
+        print(f"\n\nStopping bridge analyzer...")
         
         elapsed = time.time() - analyzer.start_time
         print(f"\nStatistics:")

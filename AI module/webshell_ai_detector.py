@@ -44,19 +44,7 @@ class WebShellDetector:
             r'\$\{["\']\\x[0-9a-f]{2}'
         ]
         
-        self.revshell_patterns = [
-            r'bash\s+-i\s*>\s*&\s*/dev/tcp/',
-            r'nc\s+-[a-z]*e\s+/bin/(?:ba)?sh',
-            r'python.*socket.*connect',
-            r'perl\s+-e.*socket.*sockaddr_in',
-            r'php\s+-r.*fsockopen',
-            r'/bin/(?:ba)?sh\s+-i',
-            r'sh\s+-i\s*>\s*&\s*/dev/udp/',
-            r'rm\s+/tmp/f;mkfifo\s+/tmp/f;cat\s+/tmp/f'
-        ]
-
         self.compiled_webshell = [re.compile(p, re.IGNORECASE) for p in self.webshell_patterns]
-        self.compiled_revshell = [re.compile(p, re.IGNORECASE) for p in self.revshell_patterns]
 
     def calculate_entropy(self, data):
         if not data: return 0.0
@@ -85,6 +73,67 @@ class WebShellDetector:
                 except: continue
             return current
         except: return payload
+    
+    def should_analyze(self, payload):
+        if not payload or len(payload) < 10:
+            return False
+
+        if self.is_http_response(payload):
+            return False
+
+        if isinstance(payload, bytes):
+            if len(payload) >= 4 and payload[:4] == b'\x89PNG':
+                return False
+            if len(payload) >= 3 and payload[:3] == b'\xFF\xD8\xFF':
+                return False
+            if len(payload) >= 6 and payload[:6] in (b'GIF87a', b'GIF89a'):
+                return False
+            if len(payload) >= 2 and payload[:2] == b'BM':
+                return False
+        
+        try:
+            payload_str = payload.decode('utf-8', errors='ignore') if isinstance(payload, bytes) else payload
+        except:
+            return True
+    
+        payload_lower = payload_str.lower()
+    
+        skip_types = ['content-type: image/', 'content-type: video/', 'content-type: audio/']
+        for skip_type in skip_types:
+            if skip_type in payload_lower:
+                return False
+    
+        return True
+
+    def is_http_response(self, payload):
+        try:
+            payload_str = payload.decode('utf-8', errors='ignore') if isinstance(payload, bytes) else payload
+            header = payload_str[:100]
+        
+            if header.startswith('HTTP/'):
+                logger.debug("HTTP response: HTTP/ prefix")
+                return True
+        
+            if re.match(r'HTTP/\d\.\d\s+\d{3}', header):
+                logger.debug("HTTP response: status pattern")
+                return True
+        
+            for h in ['Content-Type:', 'Content-Length:', 'Server:', 'X-Powered-By:']:
+                if h in header[:50]:
+                    logger.debug(f"HTTP response: {h}")
+                    return True
+        
+            first_200 = payload_str[:200].lower()
+            count = sum(1 for h in ['content-type:', 'content-length:', 'x-powered-by:', 'server:', 'set-cookie:'] 
+                    if h in first_200)
+        
+            if count >= 2:
+                logger.debug(f"HTTP response: {count} headers")
+                return True
+        
+            return False
+        except:
+            return False
 
     def extract_features(self, payload):
         payload = self._deobfuscate_payload(payload)
@@ -132,14 +181,10 @@ class WebShellDetector:
         return np.array(f[:29])
 
     def signature_detection(self, payload):
-        detections = {'webshell': False, 'revshell': False, 'matched_patterns': []}
+        detections = {'webshell': False, 'matched_patterns': []}
         for pattern in self.compiled_webshell:
             if pattern.search(payload):
                 detections['webshell'] = True
-                detections['matched_patterns'].append(pattern.pattern)
-        for pattern in self.compiled_revshell:
-            if pattern.search(payload):
-                detections['revshell'] = True
                 detections['matched_patterns'].append(pattern.pattern)
         return detections
 
@@ -155,7 +200,7 @@ class WebShellDetector:
             rf_proba = self.rf_classifier.predict_proba(features_scaled)[0][1]
             iso_pred = self.isolation_forest.predict(features_scaled)[0]
             
-            is_malicious = bool(rf_pred == 1 or sig_result['webshell'] or sig_result['revshell'])
+            is_malicious = bool(rf_pred == 1 or sig_result['webshell'])
             
             result = {
                 'is_malicious': is_malicious,
@@ -168,7 +213,6 @@ class WebShellDetector:
             if rf_pred == 1: result['detection_method'].append('ML_RandomForest')
             if iso_pred == -1: result['detection_method'].append('ML_AnomalyDetection')
             if sig_result['webshell']: result['detection_method'].append('Signature_WebShell')
-            if sig_result['revshell']: result['detection_method'].append('Signature_ReverseShell')
             
             return result
         except Exception as e:
@@ -190,6 +234,9 @@ detector = WebShellDetector()
 
 def analyze_http_payload(payload, src_ip, dst_ip, dst_port):
     if not payload: return None
+
+    if not detector.should_analyze(payload): return None
+    
     payload_str = payload.decode('utf-8', errors='ignore') if isinstance(payload, bytes) else str(payload)
     
     webshell_result = detector.predict(payload_str)
@@ -198,9 +245,5 @@ def analyze_http_payload(payload, src_ip, dst_ip, dst_port):
         'timestamp': logging.Formatter().formatTime(logging.LogRecord('', 0, '', 0, '', (), None)),
         'src_ip': src_ip, 'dst_ip': dst_ip, 'dst_port': dst_port,
         'webshell_detection': webshell_result,
-        'revshell_detection': {
-            'is_reverse_shell': webshell_result['signature_detection']['revshell'],
-            'confidence_score': 100 if webshell_result['signature_detection']['revshell'] else 0
-        },
         'alert_level': 'CRITICAL' if webshell_result['is_malicious'] else 'INFO'
     }
