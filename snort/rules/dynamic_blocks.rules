@@ -1,0 +1,19 @@
+
+# ============================================
+# AUTO-BLOCK: 192.168.2.10
+# Reason: High confidence web shell (89.0%)
+# Generated: 2026-01-11 13:13:25.682311
+# ============================================
+
+drop tcp 192.168.2.10 any -> $HOME_NET any (msg:"AI-IPS: Blocked 192.168.2.10 - TCP"; sid:3000000; gid:1; rev:1; metadata:policy balanced-ips drop, AI-generated;)
+
+drop tcp $HOME_NET any -> 192.168.2.10 any (msg:"AI-IPS: Blocked 192.168.2.10 response - TCP"; sid:3000001; gid:1; rev:1; metadata:policy balanced-ips drop, AI-generated;)
+
+drop udp 192.168.2.10 any -> $HOME_NET any (msg:"AI-IPS: Blocked 192.168.2.10 - UDP"; sid:3000002; gid:1; rev:1; metadata:policy balanced-ips drop, AI-generated;)
+
+drop udp $HOME_NET any -> 192.168.2.10 any (msg:"AI-IPS: Blocked 192.168.2.10 response - UDP"; sid:3000003; gid:1; rev:1; metadata:policy balanced-ips drop, AI-generated;)
+
+drop icmp 192.168.2.10 any -> $HOME_NET any (msg:"AI-IPS: Blocked 192.168.2.10 - ICMP"; sid:3000004; gid:1; rev:1; metadata:policy balanced-ips drop, AI-generated;)
+
+drop icmp $HOME_NET any -> 192.168.2.10 any (msg:"AI-IPS: Blocked 192.168.2.10 response - ICMP"; sid:3000005; gid:1; rev:1; metadata:policy balanced-ips drop, AI-generated;)
+
